@@ -1,0 +1,6 @@
+nba_api
+pgmpy
+pandas
+numpy
+scikit-learn
+matplotlib
