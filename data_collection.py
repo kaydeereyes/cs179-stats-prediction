@@ -9,7 +9,7 @@ from nba_api.stats.endpoints import (
 from nba_api.stats.static import teams
 
 SLEEP_SECONDS = 0.7
-SEASONS = ["2021-2022", "2022-2023", "2023-2024"]
+SEASONS = ["2021-22", "2022-23", "2023-24"]
 
 def get_all_team_game_logs(seasons=SEASONS) -> pd.DataFrame:
     """
@@ -28,13 +28,14 @@ def get_all_team_game_logs(seasons=SEASONS) -> pd.DataFrame:
                     season_type_all_star="Regular Season",
                 ).get_data_frames()[0]
 
-                log["TEAM_ID"] = team["id"]
                 log["TEAM_NAME"] = team["full_name"]
-                log["season"] = season
+                log["SEASON"] = season
                 all_rows.append(log)
                 time.sleep(SLEEP_SECONDS)
             except Exception as e:
-                print(f"    Error on {team['full_name']}: {e}")
+                #import traceback
+                print(f"    Error on {team['full_name']}:")
+                #traceback.print_exc()
                 time.sleep(2)
     df = pd.concat(all_rows, ignore_index=True)
     df = _clean_team_log(df)
@@ -44,15 +45,15 @@ def _clean_team_log(df: pd.DataFrame) -> pd.DataFrame:
     """
     Extracts Home/Away data. Classifies with WIN/LOSS label.
     """
-    df["WIN"] = (df["WIN"] == "W").astype(int)
-    df["IS_HOME"] = df["MATCHUP"].apply(
-        lambda x: 1 if "vs." in x else 0
-    )
-    df["OPP_ABB"] = df["MATCHUP"].apply(
-        lambda x: x.split("vs.  ")[-1] if "vs. " in x else x.split("@ ")[-1]
-    )
-
     df.columns = [c.upper() for c in df.columns]
+    df = df.loc[:, ~df.columns.duplicated()].copy()
+
+    df["WIN"] = (df["WL"] == "W").astype(int)
+    df["IS_HOME"] = df["MATCHUP"].str.contains("vs.").astype(int)
+
+    df["OPP_ABB"] = df["MATCHUP"].apply(
+        lambda x: x.split("vs. ")[-1] if "vs. " in x else x.split("@ ")[-1]
+    )
 
     return df
 def get_advanced_stats_for_games(game_ids: list) -> pd.DataFrame:
@@ -88,6 +89,10 @@ def build_matchup_dataset(team_logs: pd.DataFrame) -> pd.DataFrame:
     """
     df = team_logs.copy()
 
+    df.columns = [c.upper() for c in df.columns]
+    df = df.loc[:, ~df.columns.duplicated()].copy()
+
+    df["GAME_DATE"] = pd.to_datetime(df["GAME_DATE"])
     df = df.sort_values(["TEAM_ID", "GAME_DATE"])
 
     stat_cols = ["PTS", "FGA", "FG_PCT", "FG3_PCT", "FT_PCT", 
@@ -100,28 +105,40 @@ def build_matchup_dataset(team_logs: pd.DataFrame) -> pd.DataFrame:
                 .transform(lambda x: x.shift(1).rolling(10, min_periods=3).mean())
             )
     
-    home = df[df["IS_HOME"] == 1].copy()
-    away = df[df["IS_HOME"] == 0].copy()
-
     roll_cols = [c for c in df.columns if c.startswith("ROLL10_")]
     keep_cols = ["GAME_ID", "TEAM_ID", "TEAM_NAME", "WIN", "SEASON"] + roll_cols
+    
+    home = df[df["IS_HOME"] == 1][keep_cols].copy()
+    away = df[df["IS_HOME"] == 0][keep_cols].copy()
 
-    home = home[keep_cols].rename(columns={
-        **{c: f"AWAY_{c}" for c in roll_cols}, 
+
+    home = home.rename(columns={
+        "TEAM_ID": "HOME_TEAM_ID",
+        "TEAM_NAME": "HOME_TEAM_NAME",
+        "WIN": "HOME_WIN",
+        **{c: f"HOME_{c}" for c in roll_cols}
+    })
+
+    away = away.rename(columns={
         "TEAM_ID": "AWAY_TEAM_ID",
         "TEAM_NAME": "AWAY_TEAM_NAME",
         "WIN": "AWAY_WIN",
+        **{c: f"AWAY_{c}" for c in roll_cols}
     })
 
-    matchups = home.merge(away, on = ["GAME_ID", "SEASON"], how = "inner")
+    matchups = home.merge(
+        away,
+        on=["GAME_ID", "SEASON"],
+        how="inner",
+        validate="one_to_one"
+    )
 
     for col in roll_cols:
-        home_col = f"HOME_{col}"
-        away_col = f"AWAY_{col}"
-        if home_col in matchups.columns and away_col in matchups.columns:
-            matchups[f"DIFF_{col}"] = matchups[home_col] - matchups[away_col]
+        matchups[f"DIFF_{col}"] = (
+            matchups[f"HOME_{col}"] - matchups[f"AWAY_{col}"]
+        )
 
-    return matchups.dropna()
+    return matchups.dropna().reset_index(drop=True)
 
 
 
